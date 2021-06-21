@@ -31,17 +31,17 @@ public class ItemCF extends Mapper<LongWritable, Text, Text, Text> {
 					HashMap<String,Integer> Pairedata = new HashMap<String,Integer>();
 					for(int j=0;j<Love.length;j++){
 					if(i!=j){
-					if(Pairesum.containsKey(Love[i])){
-						Pairedata=Pairesum.get(Love[i]);
-						if(!Pairedata.containsKey(Love[j])){
-							Pairedata.put(Love[j], 0);
+					if(Pairesum.containsKey(Love[i])){//如果Pairesum中有这一趟的key值，那么需要在保证之前的value的基础上进行修改
+						Pairedata=Pairesum.get(Love[i]);//给Pairedata赋值为Pairesum.get(key)，保证对原纪录数据不改动仅新增
+						if(!Pairedata.containsKey(Love[j])){//如果本趟判断中key在Pairedata中没有则添加
+							Pairedata.put(Love[j], 0);//提前value设为0方便后续修改
 							Pairesum.put(Love[i], Pairedata);
 						}
 					}else{
-						Pairedata.put(Love[j], 0);
+						Pairedata.put(Love[j],0);
 						Pairesum.put(Love[i], Pairedata);
 					}	
-					context.write(new Text(Love[i]+"-"+Love[j]),new Text(User));}
+					context.write(new Text(Love[i]+"-"+Love[j]),new Text(User));}//用-链接方便reduce中获取两个数值
 					}
 				}
 		}
@@ -55,9 +55,12 @@ public class ItemCF extends Mapper<LongWritable, Text, Text, Text> {
 				String name[]=paired.split("-");
 				String User = item_data[1];
 					HashMap<String,Integer> Pairedata = Pairesum.get(name[0]);
+					/*由于第一趟MapReduce对hashmap进行了全添加，因此无需判断
+					是否存在对应key的value，直接取即可
+					*/
 						Pairedata.put(name[1],Pairedata.get(name[1])+1);
 						Pairesum.put(name[0], Pairedata);
-						server=Pairesum;
+						server=Pairesum;//纪录hashmap读取，实际上可以不要，此处涉及浅拷贝问题，后续有坑
 				context.write(new Text(paired), new Text(User));
 		}
 	}
@@ -67,32 +70,21 @@ public class ItemCF extends Mapper<LongWritable, Text, Text, Text> {
 				String data = value.toString();
 				String Paire_data[] = data.split("\\s");
 				String Paire = Paire_data[0];
-				String Paire_object[]=Paire.split("-");
-				String Pairedata=Paire_data[1];
-				for(int top=0;top<2;top++){
-					for(int lower=1;lower>=0;lower--){
-					if(Paire_object[top]!=Paire_object[lower]){
-						if(Pairesum.containsKey(Paire_object[top])){
-							HashMap<String,Integer>sever=Pairesum.get(Paire_object[top]);
-								if(sever.containsKey(Paire_object[lower])){
-								}
-								else{
-								sever.put(Paire_object[lower],Integer.parseInt(Paire_data[1]));
-								Pairesum.put(Paire_object[top], sever);
-								}
-							}
-							else{
-							HashMap<String,Integer>sever=new HashMap<String,Integer>();
-							sever.put(Paire_object[lower],Integer.parseInt(Paire_data[1]));
-							Pairesum.put(Paire_object[top], sever);
-							}
-						}
-					else{
-						continue;
-						}
-					}
-				}	
-				context.write(new Text(Paire), new Text(Pairedata));
+				String Paire_num[]=Paire_data[1].split(":");
+				if(Pairesum.containsKey(Paire)){
+					/*此次重新给Pairesum赋值，第二轮MapReduce中由于浅拷贝问题导致Pairesum
+					 中没有值，需要重新赋值**/
+				HashMap<String,Integer> Pairedata = Pairesum.get(Paire);
+				Pairedata.put(Paire_num[0],Integer.valueOf(Paire_num[1]));
+				Pairesum.put(Paire, Pairedata);
+				context.write(new Text(Paire), value);
+				}
+				else{
+					HashMap<String,Integer> Pairedata = new HashMap<String,Integer>();
+					Pairedata.put(Paire_num[0],Integer.valueOf(Paire_num[1]));
+					Pairesum.put(Paire, Pairedata);
+					context.write(new Text(Paire), value);
+				}
 		}
 	}
 	static class PairedStatistics extends Reducer<Text, Text, Text, Text>{
@@ -111,10 +103,17 @@ public class ItemCF extends Mapper<LongWritable, Text, Text, Text> {
 				if(server.containsKey(keyes[0])){
 				HashMap<String,Integer>Pairedata = Pairesum.get(keyes[0].toString());
 				for(String keyb:Pairedata.keySet()){
-				if(keyes[0]!=keyb){
-				context.write(new Text(keyes[0]),new Text(keyb+":"+Pairedata.get(keyb.toString()).toString()));
-					}
-				server.remove(keyes[0]);
+					/*对hashmap中的内容循环输出*/
+				if(keyes[0].equals(keyb)){
+					server.remove(keyes[0]);//标记已遍历输出过的内容
+					/*原本准备用server做标记数组来表示被遍历过的内容解决按行处理的问题
+					 * 但是由于java的浅拷贝问题导致Pairesum的内容也被一起删除。
+					 * */
+				}
+				else{
+					context.write(new Text(keyes[0]),new Text(keyb+":"+Pairedata.get(keyb.toString()).toString()));
+					server.remove(keyes[0]);
+				}
 				}
 			}
 		}
@@ -122,11 +121,17 @@ public class ItemCF extends Mapper<LongWritable, Text, Text, Text> {
 	static class PairedHandle extends Reducer<Text, Text, Text, Text>{
 		protected void reduce(Text key, Iterable<Text> values, Reducer<Text, Text, Text, Text>.Context context)
 				throws IOException, InterruptedException{
-				String taps[]= key.toString().split("-");
-				for(int i=0;i<taps.length;i++){
-					if(Pairesum.containsKey(taps[i])){
+				HashMap<String,Integer>Pairedata = Pairesum.get(key.toString());
+				for(String keys:Pairedata.keySet())
+				context.write(new Text(key.toString()),new Text(keys+":"+Pairedata.get(keys)));
+		}
+	}
+	/*static class PairedHandle extends Reducer<Text, Text, Text, Text>{
+		protected void reduce(Text key, Iterable<Text> values, Reducer<Text, Text, Text, Text>.Context context)
+				throws IOException, InterruptedException{
+					if(Pairesum.containsKey(key.toString())){
 						//System.out.println(Pairesum);
-					HashMap<String,Integer>object=Pairesum.get(taps[i]);
+					HashMap<String,Integer>object=Pairesum.get(key.toString());
 					 List<HashMap.Entry<String,Integer>> list = new ArrayList<HashMap.Entry<String,Integer>>(object.entrySet());
 					 Collections.sort(list,new Comparator<HashMap.Entry<String,Integer>>(){
 				            public int compare(Entry<String, Integer> o1,
@@ -135,17 +140,16 @@ public class ItemCF extends Mapper<LongWritable, Text, Text, Text> {
 				            }
 					 });
 					for(HashMap.Entry<String,Integer> mapping:list){
-						context.write(new Text(taps[i]),new Text(mapping.getKey()+":"+mapping.getValue().toString()));
+						if(key.toString()!=mapping.getKey()){
+						context.write(new Text(key.toString()),new Text(mapping.getKey()+":"+mapping.getValue().toString()));}
+						else{
+							continue;
+						}
 					}
-					Pairesum.remove(taps[i]);
-				}
-				else{
-					continue;
-					}
-				}
-
+					Pairesum.remove(key.toString());
+				}	
 		}
-	}
+	}*/
 	public static void main(String[] args) {
 		org.apache.log4j.Logger logger = org.apache.log4j.Logger.getLogger(ItemCF.class);
 		try {
@@ -181,7 +185,7 @@ public class ItemCF extends Mapper<LongWritable, Text, Text, Text> {
 			boolean res2 = jobs.waitForCompletion(true);
 			logger.info(res2);
 			//第三次MapReduce，主要目的为将两两配对形式转化为A 配对B:热度值
-			/*Job jobt = Job.getInstance(configuration);
+			Job jobt = Job.getInstance(configuration);
 			jobt.setJarByClass(ItemCF.class);
 			jobt.setMapperClass(ItemScore.class);
 			jobt.setReducerClass(PairedHandle.class);
@@ -191,8 +195,8 @@ public class ItemCF extends Mapper<LongWritable, Text, Text, Text> {
 			FileInputFormat.setInputPaths(jobt, new Path("/output/Test1/part-r-00000"));
 			//将map的context结果作为入参传入到reduce中，将结果写入到目标文件中
 			FileOutputFormat.setOutputPath(jobt, new Path("/output/Test2"));
-			boolean res3 = jobt.waitForCompletion(true);*/
-			System.exit(res2?0:1);
+			boolean res3 = jobt.waitForCompletion(true);
+			System.exit(res3?0:1);
 		} catch (IOException e) {
 			e.printStackTrace();
 		} catch (ClassNotFoundException e) {
