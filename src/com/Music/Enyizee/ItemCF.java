@@ -2,11 +2,14 @@ package com.Music.Enyizee;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map.Entry;
+
+import org.apache.accumulo.core.data.Value;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.LongWritable;
@@ -19,7 +22,8 @@ import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
 import org.apache.hadoop.mapreduce.lib.output.TextOutputFormat;
 public class ItemCF extends Mapper<LongWritable, Text, Text, Text> {
 	private static HashMap<String,HashMap<String,Integer>>Pairesum = new HashMap<String,HashMap<String,Integer>>();
-	private static HashMap<String,HashMap<String,Integer>>server = new HashMap<String,HashMap<String,Integer>>();
+	private static HashMap<String,String[]>UserHave = new HashMap<String,String[]>();
+	private static HashMap<String,HashMap<String,Integer>>UserLove = new HashMap<String,HashMap<String,Integer>>();
 	static class InputData extends Mapper<LongWritable, Text, Text, Text>{
 	protected void map(LongWritable key, Text value, Mapper<LongWritable, Text, Text, Text>.Context context)
 			throws IOException, InterruptedException {
@@ -27,6 +31,7 @@ public class ItemCF extends Mapper<LongWritable, Text, Text, Text> {
 				String item_user[] = users.split("\\s");
 				String User = item_user[0];
 				String Love[] = item_user[1].split(",");
+				UserHave.put(User, Love);
 				for(int i=0;i<Love.length;i++){
 					HashMap<String,Integer> Pairedata = new HashMap<String,Integer>();
 					for(int j=0;j<Love.length;j++){
@@ -60,8 +65,7 @@ public class ItemCF extends Mapper<LongWritable, Text, Text, Text> {
 					*/
 						Pairedata.put(name[1],Pairedata.get(name[1])+1);
 						Pairesum.put(name[0], Pairedata);
-						server=Pairesum;//纪录hashmap读取，实际上可以不要，此处涉及浅拷贝问题，后续有坑
-				context.write(new Text(paired), new Text(User));
+						context.write(new Text(paired), new Text(User));
 		}
 	}
 	static class ItemScore extends Mapper<LongWritable, Text, Text, Text>{
@@ -87,6 +91,68 @@ public class ItemCF extends Mapper<LongWritable, Text, Text, Text> {
 				}
 		}
 	}
+	static class UserLove extends Mapper<LongWritable, Text, Text, Text>{
+		protected void map(LongWritable key, Text value, Mapper<LongWritable, Text, Text, Text>.Context context)
+				throws IOException, InterruptedException {
+				String users = value.toString();
+				String item_user[] = users.split("\\s");
+				String User = item_user[0];
+				String Love[] = item_user[1].split(",");
+				HashMap<String,Integer> Lovemap = new HashMap<String,Integer>();
+				for(String love:Love){
+					HashMap<String,Integer> Pairedata = Pairesum.get(love);
+					for(String keys:Pairesum.keySet()){
+						if(Pairedata.containsKey(keys)&&!Arrays.asList(Love).contains(keys)){
+							Lovemap.put(keys,0);
+						}
+					}
+				}
+				UserLove.put(User, Lovemap);
+				context.write(new Text(User),new Text(item_user[1]));
+		}
+	}
+	static class UserHot extends Mapper<LongWritable, Text, Text, Text>{
+		protected void map(LongWritable key, Text value, Mapper<LongWritable, Text, Text, Text>.Context context)
+				throws IOException, InterruptedException {
+				String[] data = value.toString().split("\\s");
+				String User = data[0];
+				String[]hots=data[1].split(":");
+				String hot = hots[0];
+				String[] need = UserHave.get(User);
+				int sun=0;
+				if(UserLove.containsKey(User)){
+				HashMap<String,Integer>hotnum = UserLove.get(User);
+				HashMap<String,Integer>Pairedata = Pairesum.get(hot);
+				for(String kys:Pairedata.keySet()){
+					if(Arrays.asList(need).contains(kys)){
+					sun=Pairedata.get(kys).intValue()+sun;
+					}
+					else{
+						continue;
+					}
+				}
+				hotnum.put(hot,sun);
+				UserLove.put(User, hotnum);
+				//System.out.println(UserLove);
+				context.write(new Text(User), new Text(hot));
+				}
+				else{
+				HashMap<String,Integer>hotnum = new HashMap<String,Integer>();
+				HashMap<String,Integer>Pairedata = Pairesum.get(hot);
+				for(String kys:Pairedata.keySet()){
+					if(Arrays.asList(need).contains(kys)){
+					sun=Pairedata.get(kys).intValue()+sun;
+					}
+					else{
+						continue;
+					}
+				}
+				hotnum.put(hot,sun);
+				UserLove.put(User, hotnum);
+				context.write(new Text(User), new Text(hot));
+			}
+		}
+	}
 	static class PairedStatistics extends Reducer<Text, Text, Text, Text>{
 		protected void reduce(Text key, Iterable<Text> values, Reducer<Text, Text, Text, Text>.Context context)
 				throws IOException, InterruptedException {
@@ -100,19 +166,19 @@ public class ItemCF extends Mapper<LongWritable, Text, Text, Text> {
 				throws IOException, InterruptedException{
 				String keys = key.toString();
 				String keyes[] =keys.split("-");
-				if(server.containsKey(keyes[0])){
+				if(Pairesum.containsKey(keyes[0])){
 				HashMap<String,Integer>Pairedata = Pairesum.get(keyes[0].toString());
 				for(String keyb:Pairedata.keySet()){
 					/*对hashmap中的内容循环输出*/
 				if(keyes[0].equals(keyb)){
-					server.remove(keyes[0]);//标记已遍历输出过的内容
+					Pairesum.remove(keyes[0]);//标记已遍历输出过的内容
 					/*原本准备用server做标记数组来表示被遍历过的内容解决按行处理的问题
 					 * 但是由于java的浅拷贝问题导致Pairesum的内容也被一起删除。
 					 * */
 				}
 				else{
 					context.write(new Text(keyes[0]),new Text(keyb+":"+Pairedata.get(keyb.toString()).toString()));
-					server.remove(keyes[0]);
+					Pairesum.remove(keyes[0]);
 				}
 				}
 			}
@@ -126,30 +192,25 @@ public class ItemCF extends Mapper<LongWritable, Text, Text, Text> {
 				context.write(new Text(key.toString()),new Text(keys+":"+Pairedata.get(keys)));
 		}
 	}
-	/*static class PairedHandle extends Reducer<Text, Text, Text, Text>{
+	static class Pairedata extends Reducer<Text, Text, Text, Text>{
 		protected void reduce(Text key, Iterable<Text> values, Reducer<Text, Text, Text, Text>.Context context)
 				throws IOException, InterruptedException{
-					if(Pairesum.containsKey(key.toString())){
-						//System.out.println(Pairesum);
-					HashMap<String,Integer>object=Pairesum.get(key.toString());
-					 List<HashMap.Entry<String,Integer>> list = new ArrayList<HashMap.Entry<String,Integer>>(object.entrySet());
-					 Collections.sort(list,new Comparator<HashMap.Entry<String,Integer>>(){
-				            public int compare(Entry<String, Integer> o1,
-				                    Entry<String, Integer> o2) {
-				            		return o2.getValue().compareTo(o1.getValue());
-				            }
-					 });
-					for(HashMap.Entry<String,Integer> mapping:list){
-						if(key.toString()!=mapping.getKey()){
-						context.write(new Text(key.toString()),new Text(mapping.getKey()+":"+mapping.getValue().toString()));}
-						else{
-							continue;
-						}
-					}
-					Pairesum.remove(key.toString());
-				}	
+				HashMap<String,Integer> Pairedata = UserLove.get(key.toString());
+				for(String keys:Pairedata.keySet()){
+					context.write(key,new Text(keys+":"+Pairedata.get(keys).toString()));
+				}
 		}
-	}*/
+	}
+	static class outdata extends Reducer<Text, Text, Text, Text>{
+		protected void reduce(Text key, Iterable<Text> values, Reducer<Text, Text, Text, Text>.Context context)
+				throws IOException, InterruptedException{
+				for(Text value:values){
+						HashMap<String,Integer>Pairedata = UserLove.get(key.toString());
+						System.out.println(Pairedata);
+						context.write(key,new Text(value.toString()+":"+Pairedata.get(value.toString()).toString()));
+				}
+		}
+	}
 	public static void main(String[] args) {
 		org.apache.log4j.Logger logger = org.apache.log4j.Logger.getLogger(ItemCF.class);
 		try {
@@ -196,7 +257,30 @@ public class ItemCF extends Mapper<LongWritable, Text, Text, Text> {
 			//将map的context结果作为入参传入到reduce中，将结果写入到目标文件中
 			FileOutputFormat.setOutputPath(jobt, new Path("/output/Test2"));
 			boolean res3 = jobt.waitForCompletion(true);
-			System.exit(res3?0:1);
+			logger.info(res3);
+			Job jobf = Job.getInstance(configuration);
+			jobf.setJarByClass(ItemCF.class);
+			jobf.setMapperClass(UserLove.class);
+			jobf.setReducerClass(Pairedata.class);
+			jobf.setOutputKeyClass(Text.class);
+			jobf.setOutputFormatClass(TextOutputFormat.class);
+			jobf.setOutputValueClass(Text.class);
+			FileInputFormat.setInputPaths(jobf, new Path("/Input/Test.txt"));
+			//将map的context结果作为入参传入到reduce中，将结果写入到目标文件中
+			FileOutputFormat.setOutputPath(jobf, new Path("/output/Test3"));
+			boolean res4 = jobf.waitForCompletion(true);
+			Job jobv = Job.getInstance(configuration);
+			jobv.setJarByClass(ItemCF.class);
+			jobv.setMapperClass(UserHot.class);
+			jobv.setReducerClass(outdata.class);
+			jobv.setOutputKeyClass(Text.class);
+			jobv.setOutputFormatClass(TextOutputFormat.class);
+			jobv.setOutputValueClass(Text.class);
+			FileInputFormat.setInputPaths(jobv, new Path("/output/Test3/part-r-00000"));
+			//将map的context结果作为入参传入到reduce中，将结果写入到目标文件中
+			FileOutputFormat.setOutputPath(jobv, new Path("/output/Test4"));
+			boolean res5 = jobv.waitForCompletion(true);
+			System.exit(res5?0:1);
 		} catch (IOException e) {
 			e.printStackTrace();
 		} catch (ClassNotFoundException e) {
